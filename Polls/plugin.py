@@ -24,6 +24,47 @@ try:
 except ImportError:
     from pysqlite2 import dbapi2 as sqlite3 # for python2.4
 
+class Condorcet:
+    """Condorcet voting method
+    Vote with preference list and get most preferred option."""
+
+    winners = []
+    losers = []
+    running = []
+    scoreboard = []
+    maprunscore = {}
+    optioncount = 0
+
+    def __init__(self, optioncount):
+        """create a Condorcet helper for a vote with optioncount options"""
+        self.optioncount = optioncount
+        self.winners = []
+        self.losers = []
+        self.running = {}
+        self._create_running()
+        self.scoreboard = []
+        self._create_scoreboard()
+
+    def _create_running(self):
+        """Start with options 'A', 'B' etc """
+        for option in xrange(ord('A'),ord('A')+self.optioncount):
+            self.running.append(chr(option));
+
+    def _create_scoreboard(self):
+        """Create a 2d array for the running options"""
+        curcount = len(self.running)
+        self.scoreboard = []
+        for x in xrange(curcount):
+            self.scoreboard.append([])
+            for y in xrange(curcount):
+                self.scoreboard[x].append(0)
+
+
+    def add_vote(self,vote,weight=1):
+        """Adds a condorcet preferencelist to the scoreboard"""
+        votearray = vote.split(">")
+
+
 
 class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
     """Poll for in channel

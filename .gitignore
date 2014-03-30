@@ -1,5 +1,9 @@
 *.py[co]
 
+# editor tmp files
+*~
+*.swp
+
 # Packages
 *.egg
 *.egg-info

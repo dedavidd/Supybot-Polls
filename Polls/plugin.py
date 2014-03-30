@@ -18,13 +18,15 @@ import traceback
 import datetime
 import supybot.ircmsgs as ircmsgs
 import supybot.schedule as schedule
+import supybot.world as world
+import threading
 
 try:
     import sqlite3
 except ImportError:
     from pysqlite2 import dbapi2 as sqlite3 # for python2.4
 
-class Condorcet:
+class Condorcet_Helper:
     """Condorcet voting method
     Vote with preference list and get most preferred option."""
 
@@ -32,41 +34,117 @@ class Condorcet:
     losers = []
     running = []
     scoreboard = []
+    ranking = {}
     maprunscore = {}
     optioncount = 0
+    curwinner = ""
 
     def __init__(self, optioncount):
         """create a Condorcet helper for a vote with optioncount options"""
         self.optioncount = optioncount
         self.winners = []
         self.losers = []
-        self.running = {}
+        self.running = []
         self._create_running()
         self.scoreboard = []
         self._create_scoreboard()
+        self.ranking
 
     def _create_running(self):
         """Start with options 'A', 'B' etc """
-        for option in xrange(ord('A'),ord('A')+self.optioncount):
-            self.running.append(chr(option));
+        self.running = [chr(option) for option in xrange(ord('A'),ord('A')+self.optioncount)]
 
     def _create_scoreboard(self):
         """Create a 2d array for the running options"""
         curcount = len(self.running)
+        self.optioncount = curcount
         self.scoreboard = []
+        self.scoreboard = [[0 for x in range(curcount)] for y in range(curcount)]
+        """
         for x in xrange(curcount):
             self.scoreboard.append([])
             for y in xrange(curcount):
                 self.scoreboard[x].append(0)
+        """
+
+    def calc_vote(self, votes):
+        """reset the scoreboard and add all the votes"""
+        self._create_scoreboard()
+        for vote in votes:
+            self.add_vote(vote["vote"],vote["weight"])
+        self.calc_winner()
+
+    def calc_winner(self):
+        """updates the winners according to the scoreboard"""
+        running = []
+        running[:] = self.running
+        sb = self.scoreboard
+
+
+        curcount = len(running)
+        wins = [-0.5 for i in running]
+        for w in range(curcount):
+            for c in range(curcount):
+                matchresult = sb[w][c] - sb[c][w]
+                if matchresult > 0:
+                    wins[w] += 1
+                elif matchresult==0:
+                    wins[w] += 0.5
+            if wins[w]==curcount-1:
+                # we have somebody that beat everybody, condorcet winner is w
+                self.curwinner = running[w]
+                return self.curwinner
+        # we have no condorcet winner
+        return None
+
+        
+
 
 
     def add_vote(self,vote,weight=1):
-        """Adds a condorcet preferencelist to the scoreboard"""
+        """
+        Adds a condorcet preferencelist to the scoreboard
+        <vote> a string formatted like 'B>A,C>!D' where '>' signifies preference, '!' signifies a vote against the preposition
+        """
         votearray = vote.split(">")
+        winners = []
+        infavor = True
+        for e in votearray:
+            equals = []
+            for option in e.split(","):
+                if len(option)>1:
+                    if option[0]=='!':
+                        infavor = False
+                        option = option[1:]
+                c = ord(option)-ord('A')
+                c = ord(option)-ord('A')
+                equals.append(c)
+                for w in winners:
+                    self.scoreboard[w][c] += weight
+            for i in equals:
+                winners.append(i)
+
+    def mod_vote(self,vote,mod):
+        """in an existing vote add the options as specified in mod"""
+        votearray = vote.split(">")
+        winners = []
+        infavor = True
+        for e in votearray:
+            equals = []
+            for option in e.split(","):
+                equals.append(option)
+                if len(option)>1:
+                    if option[0]=='!':
+                        infavor = False
+                        option = option[1:]
+            winners.append(",".join(equals))
 
 
 
-class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
+
+
+
+class Condorcet(callbacks.Plugin, plugins.ChannelDBHandler):
     """Poll for in channel
     Make polls and people can vote on them"""
 
@@ -92,7 +170,8 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
                     started_time TIMESTAMP,         -- time when poll was created
                     isAnnouncing INTEGER default 1, -- if poll is announcing to channel
                     closed TIMESTAMP,               -- NULL by default, set to time when closed(no more voting allowed)
-                    question TEXT)""")
+                    question TEXT,
+                    deadline TIMESTAMP)""")
         self._execute_query(cursor, """CREATE TABLE choices(
                     poll_id INTEGER,
                     choice_char TEXT,
@@ -106,6 +185,22 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
                     time timestamp)""")
         db.commit()
         return db
+
+    def getDb(self, channel):
+        """Use this to get a database for a specific channel."""
+        currentThread = threading.currentThread()
+        if channel not in self.dbCache and currentThread == world.mainThread:
+            self.dbCache[channel] = self.makeDb(self.makeFilename(channel))
+        if currentThread != world.mainThread:
+            db = self.makeDb(self.makeFilename(channel))
+        else:
+            db = self.dbCache[channel]
+        try:
+            db.autocommit = 1
+        except AttributeError: # sqlite does not have autocommit, carry on anyway
+            pass
+        return db
+
 
     def _execute_query(self, cursor, queryString, *sqlargs):
         """ Executes a SqLite query
@@ -138,6 +233,27 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
             return
 
         return result[0], result[1], result[2]
+
+    def _getwinner(self, db, pollid):
+        """ Does SQL query with 'db' for 'pollid' and returns isAnnouncing, closed, question
+        or None if pollid doesnt exist
+
+        ::isAnnouncing:: Integer 1 or 0
+        ::closed:: None or datetime object
+        ::question:: string""" 
+
+        cursor = db.cursor()
+        self._execute_query(cursor, 'SELECT choice,count(*) FROM votes WHERE poll_id=? GROUP BY choice ORDER BY count(*) DESC', pollid)
+        voteresult = cursor.fetchone()
+        if voteresult is None:
+            return 
+        self._execute_query(cursor, 'SELECT choice FROM choices WHERE poll_id=? AND choice_char=?',pollid,voteresult[0])
+        result = cursor.fetchone()
+        if result is None:
+            return 
+
+
+        return result[0], voteresult[0], voteresult[1]
 
     def _runPoll(self, irc, channel, pollid):
         """Run by supybot schedule, outputs poll question and choices into channel at set interval"""
@@ -188,10 +304,10 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
         Creates a new poll with the given question and answers. <channel> is
         only necessary if the message isn't sent in the channel itself."""
 
-        capability = ircdb.makeChannelCapability(channel, 'op')
-        if not ircdb.checkCapability(msg.prefix, capability):
-            irc.error('Need ops')
-            return
+        # capability = ircdb.makeChannelCapability(channel, 'op')
+        # if not ircdb.checkCapability(msg.prefix, capability):
+            # irc.error('Need ops')
+            # return
 
         db = self.getDb(channel)
         cursor = db.cursor()
@@ -284,6 +400,7 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
 
         db = self.getDb(channel)
         cursor = db.cursor()
+        pollinfo = self._poll_info(db, pollid)
 
         # query to make sure this poll exists. make new cursor since we will use it further below to output results
         cursor1 = db.cursor()
@@ -299,8 +416,9 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
         if result is None:
             irc.error('You need to vote first to view results!')
             return
+        question = pollinfo[2]
 
-        irc.reply('Here is results for poll #%s' % pollid, prefixNick=False, private=True)
+        irc.reply('Here is results for poll #%s : %s' % (pollid, question) , prefixNick=False, private=True)
 
         # query loop thru each choice for this poll, and for each choice another query to grab number of votes, and output
         cursor2 = db.cursor()
@@ -427,6 +545,10 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
         # close the poll in db
         self._execute_query(cursor, 'UPDATE polls SET closed=? WHERE id=?', datetime.datetime.now(), pollid)
         db.commit()
+        
+        winner = self._getwinner(db, pollid)
+        question = pollinfo[2]
+        irc.reply('Poll %s : "%s" was won by "%s"' % (pollid,question,winner[0]))
 
         try:
             schedule.removeEvent('%s_poll_%s' % (channel, pollid))
@@ -480,6 +602,6 @@ class Polls(callbacks.Plugin, plugins.ChannelDBHandler):
         for schedule_name in self.poll_schedules:
             schedule.removeEvent(schedule_name)
 
-Class = Polls
+Class = Condorcet 
 
 # vim:set shiftwidth=4 softtabstop=4 expandtab:

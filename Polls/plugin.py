@@ -171,6 +171,7 @@ class Condorcet(callbacks.Plugin, plugins.ChannelDBHandler):
                     isAnnouncing INTEGER default 1, -- if poll is announcing to channel
                     closed TIMESTAMP,               -- NULL by default, set to time when closed(no more voting allowed)
                     question TEXT,
+                    polltype INTEGER default 1,
                     deadline TIMESTAMP)""")
         self._execute_query(cursor, """CREATE TABLE choices(
                     poll_id INTEGER,
@@ -182,6 +183,7 @@ class Condorcet(callbacks.Plugin, plugins.ChannelDBHandler):
                     voter_nick TEXT,
                     voter_host TEXT,
                     choice INTEGER,
+                    ranked TEXT,
                     time timestamp)""")
         db.commit()
         return db
@@ -199,7 +201,40 @@ class Condorcet(callbacks.Plugin, plugins.ChannelDBHandler):
             db.autocommit = 1
         except AttributeError: # sqlite does not have autocommit, carry on anyway
             pass
+        # self.fixDB(channel,db)
         return db
+
+    def fixDB(self, channel, db=None):
+        """adds columns and tables if missing"""
+        if db is None:
+            # do some stuff 
+            db = self.getDb(channel)
+            # return because the getDB will call this function with the db param
+            # so our work gets done
+
+        if self._ensure(db,'polls','polltype','INTEGER default 1'):
+            return
+        if self._ensure(db,'votes','ranked','text'):
+            db.commit()
+            return
+        if self._ensure(db,'polls','deadline','timestamp'):
+            db.commit()
+            return
+        db.commit()
+        return
+
+    def _ensure(self,db,table,column,coltype):
+        """add column to table if missing"""
+        cursor = db.cursor()
+        self._execute_query(cursor, 'PRAGMA table_info(%s)' % table)
+        inforesult = cursor.fetchone()
+        while inforesult is not None:
+            if inforesult[1] == column:
+                return True
+            inforesult = cursor.fetchone()
+        self._execute_query(cursor, 'ALTER TABLE %s ADD COLUMN %s %s' % (table,column,coltype))
+        print 'ALTER TABLE %s ADD COLUMN %s %s' % (table,column,coltype)
+        return False
 
 
     def _execute_query(self, cursor, queryString, *sqlargs):
@@ -304,10 +339,10 @@ class Condorcet(callbacks.Plugin, plugins.ChannelDBHandler):
         Creates a new poll with the given question and answers. <channel> is
         only necessary if the message isn't sent in the channel itself."""
 
-        # capability = ircdb.makeChannelCapability(channel, 'op')
-        # if not ircdb.checkCapability(msg.prefix, capability):
-            # irc.error('Need ops')
-            # return
+        capability = ircdb.makeChannelCapability(channel, 'op')
+        if not ircdb.checkCapability(msg.prefix, capability):
+            irc.error('Need ops')
+            return
 
         db = self.getDb(channel)
         cursor = db.cursor()
@@ -391,6 +426,45 @@ class Condorcet(callbacks.Plugin, plugins.ChannelDBHandler):
             choice_row = cursor.fetchone()
 
     vote = wrap(vote, ['channeldb', 'positiveInt', 'letter'])
+
+    def sqlitest(self, irc, msg, args, channel, query):
+        """[<channel>] <query>
+        Privately shows the results for the <query>.
+        <channel> is only necessary if the message is not sent in the
+        channel itself. You have to had voted already"""
+
+        db = self.getDb(channel)
+        cursor = db.cursor()
+
+        # query to make sure this poll exists. make new cursor since we will use it further below to output results
+        cursor1 = db.cursor()
+        self._execute_query(cursor1, '%s' % query)
+        choice_row = cursor1.fetchone()
+        if choice_row is None:
+            irc.error('result seems empty')
+            return
+
+        irc.reply('Here is results for your query : %s' % query , prefixNick=False, private=True)
+
+        # query loop thru each choice for this poll, and for each choice another query to grab number of votes, and output
+        # cursor2 = db.cursor()
+        while choice_row is not None: 
+            table_line = '| %s |' % ' | '.join(map(str,choice_row))
+            irc.reply('%s' % (table_line), prefixNick=False, private=True)
+            # irc.reply('| %s | %s | %s |' % (choice_row[0], choice_row[1], choice_row[2]), prefixNick=False, private=True)
+            choice_row = cursor1.fetchone()
+
+    sqlitest = wrap(sqlitest, ['channeldb', 'text','admin'])
+
+    def upgradepolldb(self, irc, msg, args, channel):
+        """[<channel>]
+        upgrade an old channel database to the latest version
+        <channel> is only needed from pm"""
+        self.fixDB(channel)
+        irc.reply('database upgraded')
+        return
+
+    upgradepolldb = wrap(upgradepolldb, ['channel', 'op'])
 
     def results(self, irc, msg, args, channel, pollid):
         """[<channel>] <id>
